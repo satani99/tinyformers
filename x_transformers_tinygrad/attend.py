@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 import tinygrad 
 from tinygrad.tensor import Tensor 
 from tinygrad.helpers import dtypes
+from tinygrad import nn
 
 from collections import namedtuple 
 from functools import wraps 
@@ -86,4 +87,29 @@ class Attend():
         self.create_causal_mask = onnx_create_causal_mask if onnxable else create_causal_mask 
 
         self.dropout = dropout 
+        
+        assert not (flash and talking_heads), 'talking heads not compatible with flash attention'
+
+        self.talking_heads = talking_heads 
+        if talking_heads:
+            self.pre_softmax_talking_heads = nn.Conv2d(heads, heads, 1, bias=False)
+            self.post_softmax_talking_heads = nn.Conv2d(heads, heads, 1, bias=False)
+
+        # sparse topk 
+
+        assert not (flash and sparse_topk), 'sparse topk not compatible with flash attention'
+        self.sparse_topk = sparse_topk 
+
+        # add a key/value token composed of zeros 
+        # in case this helps controlling outliers, proposed by https://www.evanmiller.org/attention-is-off-by-one.html
+
+        self.add_zero_kv = add_zero_kv 
+
+        # flash attention 
+
+        self.flash = flash 
+        
+        self.sdp_kwargs = sdp_kwargs
+
+    
          
