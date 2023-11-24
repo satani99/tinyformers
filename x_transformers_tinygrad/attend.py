@@ -217,4 +217,39 @@ class Attend():
 
         return out, Intermediates()
 
-    
+    def __call__(
+        self,
+        q, k, v,
+        mask = None,
+        attn_bias = None,
+        prev_attn = None 
+    ):
+        """
+        einstein notation
+        b - batch
+        h - heads 
+        n, i, j - sequence length (base sequence length, source, target)
+        d - feature dimension
+        """
+
+        n, heads, kv_heads, device = q.shape[-2], q.shape[1], k.shape[1], q.device 
+
+        scale = default(self.scale, q.shape[-1] ** -0.5)
+
+        causal = self.causal 
+
+        # handle kv cached decoding 
+
+        if n == 1 and causal:
+            causal = False 
+
+        # handle grouped  multi-query attention 
+
+        if kv_heads == 1:
+            k, v = map(lambda t: Tensor(rearrange(t.numpy(), 'b 1 n d -> b n d')), (k, v))
+        elif kv_heads < heads:
+            k, v = map(lambda t: Tensor(repeat(t.numpy(), 'b kvh n d -> b (r kvh) n d', r = heads // kv_heads)), (k, v))
+
+        # handle zero kv, as means for allowing network to attend to nothing
+
+        
