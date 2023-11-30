@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 
 import tinygrad 
 from tinygrad.tensor import Tensor 
-from tinygrad.helpers import dtypes
+from tinygrad.helpers import dtypes, argsort
 from tinygrad import nn
 
 from collections import namedtuple 
@@ -62,6 +62,15 @@ def onnx_create_causal_mask(i, j, device):
 def masked_fill(t, condition, fill_value):
     t[condition] = fill_value 
     return t 
+
+def topk(t, k):
+    sorted_indices = argsort(t)[::-1]
+
+    topk_indices = sorted_indices[:k]
+
+    topk_values = t[topk_indices]
+
+    return topk_values, topk_indices
 
 # main class 
 
@@ -252,4 +261,63 @@ class Attend():
 
         # handle zero kv, as means for allowing network to attend to nothing
 
-        
+        if self.add_zero_kv:
+            k, v = k.pad((0, 0, 1, 0), value=0.), v.pad((0, 0, 1, 0), value=0.)
+
+            if exists(mask):
+                mask = mask.pad((1, 0), value=1.)
+            
+            if exists(attn_bias):
+                attn_bias = attn_bias.pad((1, 0), value=0.)
+
+        if self.flash:
+            assert not exists(prev_attn), 'residual attention not compatible with flash attention'
+            return self.flash_attn(q, k, v, mask = mask, attn_bias = attn_bias)
+
+        kv_einsum_eq = 'b j d' if k.ndim == 3 else 'b h j d'
+
+        dots = Tensor(einsum(f'b h i d, {kv_einsum_eq} -> b h i j', q.numpy(), k.numpy()) * scale)
+
+        if exists(prev_attn):
+            dots = dots + prev_attn
+
+        qk_similarities = Tensor(dots.numpy().copy())
+
+        if self.talking_heads:
+            dots = self.pre_softmax_talking_heads(dots)
+
+        if exists(attn_bias):
+            dots = dots + attn_bias 
+
+        i, j, dtype = *dots.shape[-2:], dots.dtype 
+
+        mask_value = -np.finfo(dots.numpy().dtype).max 
+
+        if exists(self.sparse_topk) and self.sparse_topk < j:
+            top_values, _ = topk(dots, self.sparse_topk)
+            sparse_topk_mask = dots < top_values[..., -1:]
+            mask = (mask & sparse_topk_mask) if exists(mask) else sparse_topk_mask 
+
+        if exists(mask):
+            dots = masked_fill(dots, -mask, mask_value)
+            
+        if causal:
+            causal_mask = self.create_causal_mask(i, j, device=device)
+            dots = masked_fill(dots, causal_mask, mask_value)
+
+        pre_softmax_attn = Tensor(attn.numpy().copy())
+
+        attn = self.attn_dropout(attn)
+
+        if self.talking_heads:
+            attn = self.post_softmax_talking_heads(attn)
+
+        out = Tensor(einsum(f'b h i j, {kv_einsum_eq} -> b h i d', attn.numpy(), v.numpy()))
+
+        intermediates = Intermediates(
+            qk_similarities = qk_similarities,
+            pre_softmax_attn = pre_softmax_attn,
+            post_softmax_attn = post_softmax_attn
+        )
+
+        return out, intermediates
